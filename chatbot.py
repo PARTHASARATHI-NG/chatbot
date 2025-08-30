@@ -2,6 +2,7 @@ import sqlite3
 from rapidfuzz import fuzz  # pip install rapidfuzz
 import ollama
 import re
+import random
 
 # ========== DATABASE SETUP ==========
 conn = sqlite3.connect("memory.db")
@@ -60,7 +61,6 @@ def split_answer(answer_text):
     if not answer_text:
         return "", ""
 
-    # Find first sentence-ending punctuation (., !, ?) using regex
     match = re.search(r'[.?!]', answer_text)
     if not match:
         return answer_text, ""
@@ -68,16 +68,26 @@ def split_answer(answer_text):
     split_index = match.end()
     short = answer_text[:split_index].strip()
     detail = answer_text[split_index:].strip()
-
-    # Remove leading punctuation or whitespace from detail to avoid '.' or ';' start
     detail = re.sub(r'^[\s.;,:-]+', '', detail)
     return short, detail
 
 def wants_more_details(user_input):
-    """Simple check if user input means 'yes, give me more details'."""
-    yes_keywords = ['yes', 'sure', 'more', 'tell me', 'explain', 'detail', 'please', 'yeah', 'yep', 'ok', 'okay']
+    """Check if user input means 'yes, give me more details'."""
+    yes_keywords = [
+        'yes', 'sure', 'more', 'tell me', 'explain', 'detail',
+        'please', 'yeah', 'yep', 'ok', 'okay', 'go on', 'elaborate'
+    ]
     input_lower = user_input.lower()
     return any(word in input_lower for word in yes_keywords)
+
+def wants_stop_details(user_input):
+    """Check if user input means 'no, don’t give more details'."""
+    no_keywords = [
+        'no', 'nah', 'nope', 'not now', 'thanks', 'enough',
+        'that’s enough', 'stop', 'quit', 'done', 'fine', 'ok', 'okay'
+    ]
+    input_lower = user_input.lower()
+    return any(word in input_lower for word in no_keywords)
 
 def chunk_text(text, max_length=300):
     """Split text into chunks of approx max_length chars without cutting sentences and skipping empty ones."""
@@ -91,9 +101,8 @@ def chunk_text(text, max_length=300):
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
-            continue  # skip empty sentences
+            continue
 
-        # Check if adding this sentence exceeds max_length
         if len(current_chunk) + len(sentence) + 1 <= max_length:
             if current_chunk:
                 current_chunk += " " + sentence
@@ -107,6 +116,19 @@ def chunk_text(text, max_length=300):
         chunks.append(current_chunk)
 
     return chunks
+
+# ===== Local random stop responses =====
+STOP_RESPONSES = [
+    "Alright, feel free to ask me anything else!",
+    "Got it! I'm here if you want to learn more.",
+    "Sure, we can move on to another topic.",
+    "Okay, let me know if you want to explore something else.",
+    "Understood! Ready for your next question whenever you are."
+]
+
+def get_stop_detail_response():
+    """Return a random friendly stop message from predefined list."""
+    return random.choice(STOP_RESPONSES)
 
 # ====== DIALOG MANAGEMENT =======
 last_answer_detail_chunks = []  # Store detailed chunks for follow-up
@@ -134,40 +156,44 @@ while True:
             print(f"Bot (detail): {last_answer_detail_chunks[last_answer_index]}")
             last_answer_index += 1
             if last_answer_index == len(last_answer_detail_chunks):
-                # Finished all chunks
                 last_answer_detail_chunks = []
                 last_answer_index = 0
             else:
                 print("Bot: Would you like to hear more?")
         else:
-            # No more chunks
             last_answer_detail_chunks = []
             last_answer_index = 0
         continue
 
-    # If user says no or unrelated after asking for more details
-    if last_answer_detail_chunks and user_input.lower() in ["no", "nah", "nope", "not now"]:
-        print("Bot: Okay, let me know if you want to learn something else!")
+    # Handle stop detail responses dynamically
+    if last_answer_detail_chunks and wants_stop_details(user_input):
+        dynamic_stop_msg = get_stop_detail_response()
+        print(f"Bot: {dynamic_stop_msg}")
         last_answer_detail_chunks = []
         last_answer_index = 0
         continue
 
-    # Search in memory
-    matched_question, answer = search_memory(user_input)
-    if answer:
-        print(f"Bot (Memory): {answer}")
-        # Memory answers given as-is, no chunking or split
-        last_answer_detail_chunks = []
-        last_answer_index = 0
-        continue
+    # ===== Memory retrieval with dynamic paraphrase =====
+    matched_question, stored_answer = search_memory(user_input)
+    if stored_answer:
+        # Paraphrase memory answer dynamically each time
+        paraphrased_answer = ask_llm(f"Paraphrase this in your own words: {stored_answer}")
+        short, detail = split_answer(paraphrased_answer)
 
-    # Ask LLM if not found in memory
+        if detail:
+            last_answer_detail_chunks = chunk_text(detail, max_length=300)
+            last_answer_index = 0
+            print(f"Bot (Memory): {short} Would you like to hear more?")
+        else:
+            last_answer_detail_chunks = []
+            last_answer_index = 0
+            print(f"Bot (Memory): {short}")
+        continue  # no correctness check for memory retrieval
+
+    # ===== Ask LLM for new question =====
     answer = ask_llm(user_input)
-
-    # Split into short + detail
     short, detail = split_answer(answer)
 
-    # Store detailed chunks if any
     if detail:
         last_answer_detail_chunks = chunk_text(detail, max_length=300)
         last_answer_index = 0
@@ -177,7 +203,7 @@ while True:
         last_answer_index = 0
         print(f"Bot (LLM): {short}")
 
-    # Ask if correct and save
+    # ===== Ask if correct and save (first-time learning only) =====
     correct = input("Is this correct? (y/n): ").strip().lower()
     if correct == "y":
         full_answer = f"{short} {detail}".strip()
