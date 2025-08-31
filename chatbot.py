@@ -130,6 +130,14 @@ def get_stop_detail_response():
     """Return a random friendly stop message from predefined list."""
     return random.choice(STOP_RESPONSES)
 
+# ===== Greeting Detection =====
+GREETINGS = ["hi", "hello", "hey", "bye", "goodbye", "see you", "good night", "good morning"]
+
+def is_greeting(user_input):
+    """Check if input is a simple greeting or farewell."""
+    input_lower = user_input.lower().strip()
+    return any(input_lower.startswith(word) or input_lower == word for word in GREETINGS)
+
 # ====== DIALOG MANAGEMENT =======
 last_answer_detail_chunks = []  # Store detailed chunks for follow-up
 last_answer_index = 0  # Index of which chunk to send next
@@ -176,11 +184,10 @@ while True:
     # ===== Memory retrieval with dynamic paraphrase =====
     matched_question, stored_answer = search_memory(user_input)
     if stored_answer:
-        # Paraphrase memory answer dynamically each time
         paraphrased_answer = ask_llm(f"Paraphrase this in your own words: {stored_answer}")
         short, detail = split_answer(paraphrased_answer)
 
-        if detail:
+        if detail and not is_greeting(user_input):  # 👈 skip "Would you like more?" for greetings
             last_answer_detail_chunks = chunk_text(detail, max_length=300)
             last_answer_index = 0
             print(f"Bot (Memory): {short} Would you like to hear more?")
@@ -188,13 +195,13 @@ while True:
             last_answer_detail_chunks = []
             last_answer_index = 0
             print(f"Bot (Memory): {short}")
-        continue  # no correctness check for memory retrieval
+        continue
 
     # ===== Ask LLM for new question =====
     answer = ask_llm(user_input)
     short, detail = split_answer(answer)
 
-    if detail:
+    if detail and not is_greeting(user_input):  # 👈 skip "Would you like more?" for greetings
         last_answer_detail_chunks = chunk_text(detail, max_length=300)
         last_answer_index = 0
         print(f"Bot (LLM): {short} Would you like to hear more?")
